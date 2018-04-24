@@ -3,18 +3,30 @@ package in.srain.cube.views.ptr;
 import android.content.Context;
 import android.content.res.TypedArray;
 import android.util.AttributeSet;
-import android.view.*;
+import android.util.Log;
+import android.view.Gravity;
+import android.view.MotionEvent;
+import android.view.View;
+import android.view.ViewConfiguration;
+import android.view.ViewGroup;
 import android.widget.Scroller;
 import android.widget.TextView;
+
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.Map;
+
 import in.srain.cube.views.ptr.indicator.PtrIndicator;
 import in.srain.cube.views.ptr.util.PtrCLog;
+
 
 /**
  * This layout view for "Pull to Refresh(Ptr)" support all of the view, you can contain everything you want.
  * support: pull to refresh / release to refresh / auto refresh / keep header view while refreshing / hide header view while refreshing
- * It defines {@link in.srain.cube.views.ptr.PtrUIHandler}, which allows you customize the UI easily.
+ * It defines {@link PtrUIHandler}, which allows you customize the UI easily.
  */
 public class PtrFrameLayout extends ViewGroup {
+    private static final String TAG = "PtrFrameLayout";
 
     // status enum
     public final static byte PTR_STATUS_INIT = 1;
@@ -55,6 +67,9 @@ public class PtrFrameLayout extends ViewGroup {
     private boolean mPreventForHorizontal = false;
 
     private MotionEvent mLastMoveEvent;
+
+    private boolean hasSecondPoint = false;
+    private LinkedHashMap<Integer, Integer> pointers = new LinkedHashMap<>();
 
     private PtrUIHandlerHook mRefreshCompleteHook;
 
@@ -201,7 +216,7 @@ public class PtrFrameLayout extends ViewGroup {
         if (mContent != null) {
             measureContentView(mContent, widthMeasureSpec, heightMeasureSpec);
             if (isDebug()) {
-                ViewGroup.MarginLayoutParams lp = (MarginLayoutParams) mContent.getLayoutParams();
+                MarginLayoutParams lp = (MarginLayoutParams) mContent.getLayoutParams();
                 PtrCLog.d(LOG_TAG, "onMeasure content, width: %s, height: %s, margin: %s %s %s %s",
                         getMeasuredWidth(), getMeasuredHeight(),
                         lp.leftMargin, lp.topMargin, lp.rightMargin, lp.bottomMargin);
@@ -276,10 +291,13 @@ public class PtrFrameLayout extends ViewGroup {
         if (!isEnabled() || mContent == null || mHeaderView == null) {
             return dispatchTouchEventSupper(e);
         }
-        int action = e.getAction();
+        int action = e.getActionMasked();
+        int actionIndex = e.getActionIndex();
         switch (action) {
             case MotionEvent.ACTION_UP:
             case MotionEvent.ACTION_CANCEL:
+                Log.e(TAG, "ACTION_UP: " + e.getY());
+                pointers.clear();
                 mPtrIndicator.onRelease();
                 if (mPtrIndicator.hasLeftStartPosition()) {
                     if (DEBUG) {
@@ -295,7 +313,18 @@ public class PtrFrameLayout extends ViewGroup {
                     return dispatchTouchEventSupper(e);
                 }
 
+            case MotionEvent.ACTION_POINTER_UP:
+                int pointId = e.getPointerId(actionIndex);
+                pointers.remove(pointId);
+                Log.e(TAG, "ACTION_POINTER_UP: " + e.getY(actionIndex) + ", pointerIndex: " + actionIndex + ", pointerId: " + pointId);
+                if (pointers.size() <= 1) {
+                    hasSecondPoint = false;
+                }
+                return true;
+
             case MotionEvent.ACTION_DOWN:
+                Log.e(TAG, "ACTION_DOWN: " + e.getY());
+                pointers.put(0, 0);
                 mHasSendCancelEvent = false;
                 mPtrIndicator.onPressDown(e.getX(), e.getY());
 
@@ -308,9 +337,48 @@ public class PtrFrameLayout extends ViewGroup {
                 dispatchTouchEventSupper(e);
                 return true;
 
+            case MotionEvent.ACTION_POINTER_DOWN:
+                int pointerId = e.getPointerId(actionIndex);
+                pointers.put(pointerId, actionIndex);
+                Log.e(TAG, "ACTION_POINTER_DOWN: " + e.getY(actionIndex) + ", pointerIndex: " + actionIndex + ", pointerId: " + pointerId);
+
+                if (pointers.size() > 1) {
+                    hasSecondPoint = true;
+                    mHasSendCancelEvent = false;
+                    mPtrIndicator.onPressDown(e.getX(), e.getY(actionIndex));
+
+                    mScrollChecker.abortIfWorking();
+
+                    mPreventForHorizontal = false;
+                    dispatchTouchEventSupper(e);
+                    return true;
+                }
+
+                return dispatchTouchEventSupper(e);
+
+
             case MotionEvent.ACTION_MOVE:
+                float curY;
+                if (hasSecondPoint) {
+                    Iterator<Map.Entry<Integer, Integer>> iterator = pointers.entrySet().iterator();
+                    Map.Entry<Integer, Integer> tail = null;
+                    while (iterator.hasNext()) {
+                        tail = iterator.next();
+                        Log.d("map", tail.getKey() + ":" + tail.getValue());
+                    }
+                    if (tail != null) {
+                        int pointerIndex = e.findPointerIndex(tail.getKey());
+                        curY = e.getY(pointerIndex);
+                    } else {
+                        curY = e.getY();
+                    }
+                } else {
+                    curY = e.getY();
+                }
+                Log.e(TAG, "ACTION_MOVE: " + curY);
+
                 mLastMoveEvent = e;
-                mPtrIndicator.onMove(e.getX(), e.getY());
+                mPtrIndicator.onMove(e.getX(), curY);
                 float offsetX = mPtrIndicator.getOffsetX();
                 float offsetY = mPtrIndicator.getOffsetY();
 
@@ -969,6 +1037,7 @@ public class PtrFrameLayout extends ViewGroup {
             mScroller = new Scroller(getContext());
         }
 
+        @Override
         public void run() {
             boolean finish = !mScroller.computeScrollOffset() || mScroller.isFinished();
             int curY = mScroller.getCurrY();
